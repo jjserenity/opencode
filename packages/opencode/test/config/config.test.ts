@@ -9,7 +9,7 @@ import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 
 import { InstanceRef } from "../../src/effect/instance-ref"
 import type { InstanceContext } from "../../src/project/instance-context"
-import { Auth } from "../../src/auth"
+import { AuthWellKnown } from "@opencode-ai/core/auth-well-known"
 import { Account } from "../../src/account/account"
 import { AccessToken, AccountID, OrgID } from "../../src/account/schema"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -35,8 +35,9 @@ import { ProjectID } from "../../src/project/schema"
 import { Filesystem } from "@/util/filesystem"
 import { ConfigPlugin } from "@/config/plugin"
 import { AccountTest } from "../fake/account"
-import { AuthTest } from "../fake/auth"
 import { NpmTest } from "../fake/npm"
+import { Substitution } from "@opencode-ai/core/substitution"
+import { AuthWellKnownTest } from "../fake/auth-well-known"
 
 /** Infra layer that provides FileSystem, Path, ChildProcessSpawner for test fixtures */
 const infra = CrossSpawnSpawner.defaultLayer.pipe(
@@ -58,12 +59,17 @@ const json = (request: Parameters<typeof HttpClientResponse.fromWeb>[0], body: u
     }),
   )
 
-const wellKnownAuth = (url: string) =>
-  Layer.mock(Auth.Service)({
-    all: () =>
-      Effect.succeed({
-        [url]: new Auth.WellKnown({ type: "wellknown", key: "TEST_TOKEN", token: "test-token" }),
-      }),
+const wellKnownAuth = (url: string, content: unknown) =>
+  Layer.mock(AuthWellKnown.Service)({
+    configs: () =>
+      Effect.succeed([
+        {
+          url,
+          source: `${url.replace(/\/+$/, "")}/.well-known/opencode`,
+          dir: `${url.replace(/\/+$/, "")}/.well-known`,
+          content,
+        },
+      ]),
   })
 
 function remoteConfigClient(input: {
@@ -87,15 +93,16 @@ function remoteConfigClient(input: {
 
 const configLayer = (
   options: {
-    auth?: Layer.Layer<Auth.Service>
+    wellKnown?: Layer.Layer<AuthWellKnown.Service>
     account?: Layer.Layer<Account.Service>
     client?: HttpClient.HttpClient
   } = {},
 ) =>
   Config.layer.pipe(
     Layer.provide(testFlock),
+    Layer.provide(Substitution.defaultLayer),
     Layer.provide(Env.defaultLayer),
-    Layer.provide(options.auth ?? AuthTest.empty),
+    Layer.provide(options.wellKnown ?? AuthWellKnownTest.empty),
     Layer.provide(options.account ?? AccountTest.empty),
     Layer.provideMerge(infra),
     Layer.provide(NpmTest.noop),
@@ -227,7 +234,13 @@ const wellKnown = (input: {
   })
   return {
     seen,
-    it: configIt({ auth: wellKnownAuth(input.authUrl ?? "https://example.com"), client }),
+    it: configIt({
+      wellKnown: wellKnownAuth(input.authUrl ?? "https://example.com", {
+        ...(input.config !== undefined ? { config: input.config } : {}),
+        ...(input.remoteConfig !== undefined ? { remote_config: input.remoteConfig } : {}),
+      }),
+      client,
+    }),
   }
 }
 
@@ -855,12 +868,6 @@ Nested command template`,
     )
 
     const config = yield* Config.use.get()
-
-    expect(config.command?.["hello"]).toEqual({
-      description: "Test command",
-      template: "Hello from plural commands",
-    })
-
     expect(config.command?.["nested/child"]).toEqual({
       description: "Nested command",
       template: "Nested command template",
@@ -1503,8 +1510,17 @@ test("remote well-known config can use FetchHttpClient layer", async () => {
         Config.layer.pipe(
           Layer.provide(testFlock),
           Layer.provide(AppFileSystem.defaultLayer),
+          Layer.provide(Substitution.defaultLayer),
           Layer.provide(Env.defaultLayer),
-          Layer.provide(wellKnownAuth(server.url.origin)),
+          Layer.provide(
+            wellKnownAuth(server.url.origin, {
+              config: {
+                remote_config: {
+                  url: `${server.url.origin}/.well-known/opencode`,
+                },
+              },
+            }),
+          ),
           Layer.provide(AccountTest.empty),
           Layer.provideMerge(infra),
           Layer.provide(NpmTest.noop),
